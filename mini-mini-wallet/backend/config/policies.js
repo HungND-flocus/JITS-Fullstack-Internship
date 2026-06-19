@@ -18,7 +18,8 @@ module.exports.policies = {
   ***************************************************************************/
 
   // '*': true,
-  '*': false,
+  // thay đổi: mặc định tất cả các API đều bị chặn bởi isLoggedIn
+  '*': 'isLoggedIn',
 
 
   AuthController: {

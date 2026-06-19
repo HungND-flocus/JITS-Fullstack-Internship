@@ -50,9 +50,10 @@ module.exports.datastores = {
     ***************************************************************************/
     // adapter: 'sails-mysql',
     // url: 'mysql://user:password@host:port/database',
+    // url: 'mongodb+srv://hungnguyenduc023_db_user:gXtpcdVBGuDIQnJx@cluster0.gdjiat4.mongodb.net/?appName=Cluster0',
     adapter: 'sails-mongo', // MongoDB adapter
-    url: 'mongodb+srv://hungnguyenduc023_db_user:08042005@cluster0.rx7boil.mongodb.net/?appName=Cluster0',
+    url: 'mongodb://hungnguyenduc023_db_user:gXtpcdVBGuDIQnJx@ac-xbcg8ny-shard-00-00.gdjiat4.mongodb.net:27017,ac-xbcg8ny-shard-00-01.gdjiat4.mongodb.net:27017,ac-xbcg8ny-shard-00-02.gdjiat4.mongodb.net:27017/mini-mini-wallet?ssl=true&replicaSet=atlas-3lkehp-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0'
   },
-
-
 };
+
+

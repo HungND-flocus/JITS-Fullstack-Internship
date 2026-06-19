@@ -20,4 +20,8 @@ module.exports.policies = {
   // '*': true,
   '*': false,
 
+
+  AuthController: {
+    "*": true,
+  }
 };

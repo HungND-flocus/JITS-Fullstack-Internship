@@ -10,17 +10,21 @@ module.exports = {
   attributes: {
     sender: {
       model: 'customer',
-      required: true,
     },
     receiver: {
       model: 'customer',
-      required: true,
     },
     amount: {
       type: 'number',
       required: true,
       min: 1000,
     },
+    type: {
+      type: 'string',
+      isIn: ['transfer', 'deposit', 'withdraw'],
+      defaultsTo: 'transfer'
+    },
+
     status: {
       type: 'string',
       isIn: ['success', 'failed'],

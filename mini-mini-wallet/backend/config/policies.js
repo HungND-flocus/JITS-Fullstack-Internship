@@ -18,11 +18,14 @@ module.exports.policies = {
   ***************************************************************************/
 
   // '*': true,
-  // thay đổi: mặc định tất cả các API đều bị chặn bởi isLoggedIn
-  '*': 'isLoggedIn',
-
+  // thay đổi: mặc định tất cả các API đều bị chặn
+  '*': false,
 
   AuthController: {
-    "*": true,
+    '*': true
+  },
+
+  TransactionController: {
+    '*': 'isLoggedIn'
   }
 };

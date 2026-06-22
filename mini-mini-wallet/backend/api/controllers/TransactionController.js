@@ -6,6 +6,7 @@
  */
 
 const respCode = require('../services/respCode');
+const TransactionService = require('../services/TransactionService');
 
 module.exports = {
     // 1. API Chuyển tiền
@@ -62,6 +63,41 @@ module.exports = {
         } catch (err) {
             return res.error(respCode.SERVER_ERROR, "Lỗi hệ thống" + err.message);
         }
-    }
+    },
+
+    // 3. API nạp tiền 
+    deposit: async function (req, res) {
+        try {
+            const { amount } = req.body;
+            const result = await TransactionService.executeDeposit(req.userId, amount);
+            if (result.isError) return res.error(result.code, result.msg);
+            return res.ok({
+                message: "Nạp tiền thành công",
+                transaction: result.transaction
+            });
+        } catch (err) {
+            return res.error(
+                respCode.SERVER_ERROR, "Lỗi hệ thống" + err.message
+            );
+        }
+    },
+
+    // 4. API rút tiền
+    withdraw: async function (req, res) {
+        try {
+            const { amount } = req.body;
+            const result = await TransactionService.executeWithdraw(req.userId, amount);
+
+            if (result.isError) return res.error(result.code, result.msg);
+            return res.ok({
+                message: "Rút tiền thành công",
+                transaction: result.transaction
+            });
+        } catch (err) {
+            return res.error(
+                respCode.SERVER_ERROR, "Lỗi hệ thống" + err.message
+            );
+        }
+    },
 };
 

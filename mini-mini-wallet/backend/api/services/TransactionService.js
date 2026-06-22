@@ -61,5 +61,56 @@ module.exports = {
             isError: false,
             transaction: newTransaction
         };
-    }
+    },
+
+    // ham nap tien
+    executeDeposit: async function (userId, amount) {
+        if (!amount || amount < 1000) {
+            return {
+                isError: true,
+                code: respCode.INVALID_AMOUND,
+                msg: "Số tiền nạp không hợp lệ!"
+            };
+        }
+        const pocket = await Pocket.findOne({ customer: userId });
+        await Pocket.updateOne({ id: pocket.id }).set({
+            balance: pocket.balance + amount
+        });
+
+        // receiver is user -> type is deposit
+        const tx = await Transaction.create({
+            receiver: userId,
+            amount: amount,
+            type: 'deposit',
+        }).fetch();
+        return {
+            isError: false,
+            transaction: tx
+        };
+    },
+
+    // withdraw function
+    executeWithdraw: async function (userId, amount) {
+        const pocket = await Pocket.findOne({ customer: userId });
+        if (pocket.balance < amount || amount < 1000 || !amount) {
+            return {
+                isError: true,
+                code: respCode.INVALID_AMOUND,
+                msg: "Số tiền rút không hợp lệ!"
+            };
+        }
+        await Pocket.updateOne({ id: pocket.id }).set({
+            balance: pocket.balance - amount
+        });
+
+        const tx = await Transaction.create({
+            sender: userId,
+            amount: amount,
+            type: 'withdraw'
+        }).fetch();
+        return {
+            isError: false,
+            transaction: tx
+        };
+    },
 };

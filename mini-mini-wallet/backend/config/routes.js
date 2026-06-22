@@ -16,4 +16,5 @@ module.exports.routes = {
     'POST /api/v1/transaction/history': 'TransactionController.history',
     'POST /api/v1/transaction/deposit': 'TransactionController.deposit',
     'POST /api/v1/transaction/withdraw': 'TransactionController.withdraw',
+    'POST /api/v1/auth/refresh-token': 'AuthController.refreshToken',
 };

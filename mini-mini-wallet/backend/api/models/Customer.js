@@ -20,6 +20,11 @@ module.exports = {
       type: 'string',
       required: true,
     },
+
+    refreshToken: {
+      type: 'string',
+      allowNull: true
+    },
   },
 
   beforeCreate: async function (valuesToSet, proceed) {

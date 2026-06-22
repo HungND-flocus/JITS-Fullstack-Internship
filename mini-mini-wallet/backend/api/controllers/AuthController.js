@@ -65,12 +65,47 @@ module.exports = {
             }
 
             // B3: Sinh mã JWT Token chứa ID của user
-            const token = JwtService.sign({ id: user.id });
+            const accessToken = JwtService.sign({ id: user.id });
+            const refreshToken = JwtService.signRefresh({ id: user.id });
+
+            await Customer.updateOne({ id: user.id }).set({
+                refreshToken: refreshToken
+            });
 
             // B4: Trả về token và thông tin user
             return res.ok({
-                token: token,
+                accessToken: accessToken,
+                refreshToken: refreshToken,
                 user: user
+            });
+
+        } catch (err) {
+            return res.error(respCode.SERVER_ERROR, 'Lỗi hệ thống: ' + err.message);
+        }
+    },
+
+    refreshToken: async function (req, res) {
+        try {
+            const { refreshToken } = req.body;
+            if (!refreshToken) return res.error(respCode.BAD_REQUEST, "Thiếu Refresh Token");
+            let decoded;
+            try {
+                decoded = JwtService.verifyRefresh(refreshToken);
+            } catch (err) {
+                return res.error(respCode.UNAUTHORIZED, 'Refresh Token không hợp lệ hoặc đã hết hạn');
+            }
+
+            const user = await Customer.findOne({ id: decoded.id });
+
+            if (!user) return res.error(respCode.NOT_FOUND, "Không tìm thấy người dùng");
+
+            if (user.refreshToken !== refreshToken) {
+                return res.error(respCode.UNAUTHORIZED, 'Refresh Token đã bị vô hiệu hóa');
+            }
+
+            const newAccessToken = JwtService.sign({ id: user.id });
+            return res.ok({
+                accessToken: newAccessToken
             });
 
         } catch (err) {

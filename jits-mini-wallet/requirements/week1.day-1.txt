@@ -1,0 +1,26 @@
+Dựng môi trường
+
+YÊU CẦU
+
+- Tự dựng backend bằng Sails, kết nối tới một MongoDB chạy ở local. Tự dựng một frontend; chọn công nghệ nào tùy ý: React, Next.js, hay HTML thuần đều được.
+- Mục tiêu cuối ngày: trên frontend có một nút ping; bấm vào thì gọi sang backend; backend trả về pong; frontend hiển thị được kết quả đó. 
+
+
+QUY ƯỚC
+
+Một số quy ước của dự án. Hôm nay chỉ cần nắm và áp dụng ở mức tối thiểu cho endpoint ping:
+
+- Blueprint tắt: dự án tắt toàn bộ blueprint (actions, rest, shortcuts) nên Sails không tự sinh API. Mọi endpoint phải tự khai trong config/routes.js; không khai thì không có API.
+- Controller kiểu cổ điển: mỗi controller là một object gồm nhiều action, mỗi action là một hàm dạng (req, res). Dự án không dùng kiểu actions2 (mỗi action một file riêng, khai báo bằng fn/inputs/exits).
+- HTTP method của mọi API đều là POST.
+- Response thống nhất: mọi API trả về JSON theo phong bì {err, message, data} — err và message là bắt buộc, data đi kèm khi có dữ liệu. err là mã nghiệp vụ nội bộ, không phải mã HTTP; err bằng 200 là thành công, khác 200 là lỗi. Quan trọng: theo quy ước, HTTP status luôn là 200 kể cả khi err báo lỗi; client phân biệt thành/bại bằng trường err chứ không đọc HTTP status.
+- Không dùng thư mục api/helpers của Sails.
+
+TIÊU CHÍ HOÀN THÀNH
+
+Backend Sails chạy được và kết nối được MongoDB ở local. Frontend chạy được, có nút ping. Bấm ping thì frontend gọi sang backend qua một endpoint tự khai trong routes.js; backend trả về pong theo đúng phong bì response của dự án (có err và message, HTTP 200); frontend hiển thị được err và message.
+
+TÌM HIỂU THÊM:
+
+- Tìm hiểu cách Sails load các file khi start app.
+- Tìm hiểu luồng request đi qua các bước nào, file nào, trong Sails.

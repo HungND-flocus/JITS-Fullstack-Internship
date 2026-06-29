@@ -1,4 +1,4 @@
-# Thiết kế Hệ thống Mini Wallet
+# Thiết kế Hệ thống Mini Wallet (Bản Nâng cấp - Modern Architecture)
 
 ## 1. [mini-mini-wallet] Sơ đồ Luồng Chuyển tiền P2P (Peer-to-Peer Transfer)
 Sơ đồ dưới đây mô tả luồng nghiệp vụ khi một người dùng thực hiện chuyển tiền cho người dùng khác, đảm bảo tuân thủ các quy ước bảo mật và nghiệp vụ của dự án.
@@ -72,8 +72,9 @@ Hệ thống Mini-Wallet được thiết kế theo kiến trúc Config-Driven. 
 Nhóm này lưu vết lại toàn bộ quá trình dòng tiền thực sự chạy.
 - **TransactionTrail**: "Hồ sơ bệnh án" của một giao dịch, sống xuyên suốt qua 3 bước (Request -> Confirm -> Verify). Dùng `transRefId` để làm mã tra cứu và quản lý trạng thái (`pending`, `done`, `failed`).
 - **Transaction**: "Biên lai" giao dịch. Chỉ được sinh ra ở bước cuối cùng (Verify) nếu tiền đã thực sự được dời thành công trong Database Transaction.
-- **Pocket (Ví)**: Lưu trữ số dư (`balance`). Chứa thuộc tính `pocketType` (CUSTOMER, BILLER, SYSTEM, BANK). Được bảo vệ nghiêm ngặt bằng mã băm `checksum` chống sửa tay trực tiếp trong DB.
-- **PocketEntry**: Dấu vết chi tiết của từng dòng tiền (Bút toán). Mỗi `glStep` ở trên khi chạy thành công sẽ đẻ ra một bản ghi PocketEntry.
+- **Pocket (Ví)**: Lưu trữ số dư (`balance`). Chứa thuộc tính `client` (customer, biller, system, bank). Được bảo vệ nghiêm ngặt bằng mã băm `checksum` chống sửa tay trực tiếp trong DB.
+- **PocketEntry**: Sổ cái bất biến (Append-Only Ledger). Mỗi biến động tiền tệ chỉ được phép **INSERT** vào đây, tuyệt đối không dùng UPDATE.
+- **SystemAuditLog**: Ghi lại lịch sử quét bảo mật của Background Job.
 
 ### 2.3. Nhóm Danh tính & Đối tác
 - **Customer**: Khách hàng cá nhân, đăng nhập bằng Số điện thoại và PIN. Tự động sinh `Pocket` khi đăng ký.
@@ -92,6 +93,7 @@ sequenceDiagram
     actor Client
     participant Controller
     participant Engine as NeonMessage
+    participant Redis as Redis (Mutex Lock)
     participant Config as Database (Config)
     participant Ledger as Database (Runtime/Pocket)
 
@@ -111,15 +113,16 @@ sequenceDiagram
         Engine-->>Client: Trả về yêu cầu xác thực (PIN / NONE)
         
     else Bước 3: processVerifyStep (TIỀN CHẠY)
+        Engine->>Redis: Xin khoá Ví người gửi (Redis SETNX chống Race Condition)
         Engine->>Ledger: Tải lại TransactionTrail
-        Engine->>Ledger: Khoá Ví người gửi (Chống Race Condition)
         Engine->>Engine: Kiểm tra PIN + Validate nghiệp vụ lần cuối
         
         Engine->>Config: Đọc kịch bản ghi sổ (glSteps) từ TransDefinition
-        Note over Engine, Ledger: Bắt đầu DB Transaction (Thành công hết hoặc Rollback)
-        Engine->>Ledger: Thực thi glSteps (Cộng/Trừ ví liên quan)
-        Engine->>Ledger: Lưu PocketEntry + Tạo Transaction (Biên lai)
-        Engine->>Ledger: Mở khoá Ví
+        Note over Engine, Ledger: Bắt đầu DB Transaction (Append-Only)
+        Engine->>Ledger: Insert các PocketEntry (Cộng/Trừ ví liên quan)
+        Engine->>Ledger: Cập nhật Read-Model (Cache Balance & Checksum)
+        Engine->>Ledger: Tạo Transaction (Biên lai)
+        Engine->>Redis: Giải phóng Khoá Ví
         Engine-->>Client: Trả về kết quả Thành công
     end
 ```
@@ -142,11 +145,13 @@ Nhờ kiến trúc Config-Driven, chúng ta có thể phục vụ 3 bài toán k
 
 ### 4.3. Thanh toán Hóa đơn Bill Payment (High)
 Nghiệp vụ này phức tạp nhất vì phải gọi ra ngoài hệ thống của đối tác (Biller).
+
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client
     participant Engine as NeonMessage
+    participant Redis as Redis (Mutex Lock)
     participant Ledger as Database
     participant Biller as Biller System (Bên thứ 3)
 
@@ -160,21 +165,39 @@ sequenceDiagram
     Engine-->>Client: Yêu cầu nhập PIN
 
     Client->>Engine: B3: Verify (Nhập PIN)
-    Engine->>Engine: Khoá ví, Kiểm tra PIN
-    
-    Note over Engine, Ledger: Bắt đầu DB Transaction (ACID)
-    Engine->>Ledger: THU TIỀN KHÁCH TRƯỚC (Trừ ví Customer)
+    Engine->>Redis: Khoá ví (Redis SETNX)
+    Engine->>Engine: Kiểm tra PIN
     
     Engine->>Biller: Gọi API paymentUrl (Báo đã thanh toán)
     
     alt Biller báo lỗi
-        Engine->>Ledger: Hoàn tiền (Rollback DB Transaction)
         Engine->>Ledger: Cập nhật trạng thái thất bại
+        Engine->>Redis: Mở khoá Ví
         Engine-->>Client: Trả về lỗi (Tiền khách không bị mất)
     else Biller xác nhận thành công
-        Engine->>Ledger: Cộng tiền ví Biller
+        Note over Engine, Ledger: Bắt đầu DB Transaction (ACID)
+        Engine->>Ledger: Ghi PocketEntry trừ ví Customer
+        Engine->>Ledger: Ghi PocketEntry cộng tiền ví Biller
         Engine->>Ledger: Commit DB Transaction
+        Engine->>Redis: Mở khoá Ví
         Engine-->>Client: Biên lai thành công
     end
 ```
 
+---
+
+## 5. Biện luận Kiến trúc: Tại sao lại nâng cấp so với thiết kế 10 năm trước?
+
+Thiết kế ban đầu của dự án mang đậm chất mô hình Core Banking truyền thống. Tuy nhiên, để hệ thống thực sự "sống" được trong môi trường Production hiện đại với lượng truy cập khổng lồ, nhóm đã quyết định nâng cấp 3 thành phần cốt lõi tập trung vào **Hiệu năng & Bảo mật**:
+
+### 5.1. Chống Double-spending bằng Redis Mutex Lock
+- **Vấn đề cũ:** Khóa ví bằng cách `UPDATE state='inProgress'` xuống MongoDB. Cách này tốn Disk I/O, chậm, và rất dễ xảy ra Deadlock hoặc Race condition nếu có 2 luồng request chạm vào Database cùng 1 mili-giây.
+- **Giải pháp:** Sử dụng **Redis `SETNX`**. Vì Redis chạy trên RAM và là Single-threaded, nó đảm bảo tính Atomic truyệt đối. Khóa một ví bằng Redis chỉ tốn chưa tới 1 mili-giây, giúp bảo vệ an toàn cho Bước Verify mà không làm nghẽn cổ chai Database.
+
+### 5.2. Chuyển đổi sổ cái sang Append-Only Ledger (Event Sourcing)
+- **Vấn đề cũ:** Khi cộng/trừ tiền, hệ thống dùng hàm `$inc` để cập nhật đè lên trường `balance`. Điểm yếu chí mạng là ORM Waterline của SailsJS không hỗ trợ tốt `$inc` nguyên bản, dẫn đến rủi ro sai lệch số dư. Ngoài ra, việc cập nhật đè làm mất đi khả năng kiểm toán (Audit).
+- **Giải pháp:** Áp dụng nguyên lý của Blockchain. **Không bao giờ UPDATE số dư.** Mọi biến động dòng tiền đều được `INSERT` thêm một dòng vào bảng `PocketEntry`. Trường `balance` ở bảng `Pocket` giờ đây chỉ đóng vai trò là một cái Cache (Read-model) để đọc cho nhanh. Nếu xảy ra tranh chấp, chỉ cần cộng dồn toàn bộ `PocketEntry` là ra chính xác số dư thực tế. Điều này mang lại sự bảo mật toàn vẹn dữ liệu 100%.
+
+### 5.3. Rà quét bảo mật ngầm (Background Checksum Auditor)
+- **Vấn đề cũ:** Checksum mã hoá số dư giúp chống hack, nhưng nó chỉ được phát hiện bị lỗi khi *có một giao dịch đi ngang qua*. Nếu hacker lén sửa DB lúc 2h sáng, đến 8h sáng khách hàng giao dịch mới phát hiện ra.
+- **Giải pháp:** Dùng `sails-hook-cron` để viết một Worker chạy ngầm (Cron job). Cứ mỗi 5 phút, con bot này sẽ tự động chạy qua hàng triệu ví trong Database, tính toán lại Checksum và so sánh. Nếu phát hiện bị lệch, nó ngay lập tức đóng băng (Freeze) Ví đó và lưu vết vào `SystemAuditLog` để cảnh báo Admin. Cơ chế này biến hệ thống từ "bảo mật thụ động" thành "bảo mật chủ động".

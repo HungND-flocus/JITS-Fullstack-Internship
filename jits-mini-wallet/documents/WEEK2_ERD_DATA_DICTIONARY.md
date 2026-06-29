@@ -1,16 +1,10 @@
-# ERD + Data Dictionary — Mini-Wallet Engine (v3)
+# ERD + Data Dictionary — Mini-Wallet Engine (v4 - Modern Architecture)
 
-> **Tài liệu này:** Thiết kế cơ sở dữ liệu chi tiết, bám sát `WEEK2-DESIGN-BRIEF.md` mục 5–6.  
+> **Tài liệu này:** Thiết kế cơ sở dữ liệu chi tiết, bám sát `WEEK2-DESIGN-BRIEF.md` mục 5–6, đã được nâng cấp với **SailsJS & Kiến trúc Hiện đại (Redis, Event Sourcing, Background Auditor)**.  
 > **Scope:** 3 nghiệp vụ (P2P / Cash-in / Bill Payment), 3 bước Engine (Request → Confirm → Verify).  
-> **v3 — Các thay đổi so với v2:**
-> - `TransactionTrail`: bỏ field `transRefId` riêng — `_id` chính là `transRefId` (các model khác lưu `String(_id)`)
-> - `Biller`: bỏ field `pocket` trực tiếp — nhất quán với `Customer`, tra ví qua `Pocket.findOne({ user: biller._id, client: 'biller' })`
->
-> **v2 — Các thay đổi so với v1:**
-> - `TransactionTrail` bổ sung `initiatorId` + `initiatorType`
-> - `TransDefinition`: đổi field `code` → `serviceId` (tránh nhầm với `service.code`)
-> - `Customer–Pocket`: thống nhất 1-1; bỏ field `pocket` trên `Customer`, tra ví qua `Pocket.user`
-> - `Officer.role`: giữ nguyên, thêm ghi chú phạm vi áp dụng
+> **v4 — Các thay đổi so với v3 (Nâng cấp Hiệu năng & Bảo mật):**
+> - `Pocket`: Bỏ trường `state` (inProgress/idle) vì chuyển sang dùng **Redis Mutex Lock**. Số dư `balance` hiện tại đóng vai trò là Cache (Read Model) theo mô hình **Append-Only Ledger**.
+> - Thêm bảng `SystemAuditLog`: Lưu trữ lịch sử rà quét bảo mật của **Background Checksum Auditor**.
 
 ---
 
@@ -131,7 +125,6 @@ erDiagram
         string currency FK
         number balance
         string checksum
-        string state
         string status
     }
 
@@ -143,6 +136,16 @@ erDiagram
         ObjectId credit FK
         number amount
         string status
+        Date createdAt
+    }
+
+    SystemAuditLog {
+        ObjectId _id PK
+        string auditType
+        string targetType
+        ObjectId targetId
+        string status
+        string details
         Date createdAt
     }
 
@@ -276,8 +279,6 @@ Mỗi phần tử trong mảng `fieldBuilder` là một **luật dựng biến**
 
 ### 2.4. `TransDefinition` — Kịch bản ghi sổ kép (Double-Entry Ledger)
 
-> ⚠️ **v2 — field đổi tên:** `code` → `serviceId` để tránh nhầm với `service.code`. Giá trị vẫn là `String(service._id)`.
-
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
 | `_id` | `ObjectId` | PK, auto | Khoá chính |
@@ -304,70 +305,46 @@ Bất biến: **Tổng debit = Tổng credit** ở mỗi nghiệp vụ.
 | `productLevel` | `"SENDERID"` hoặc `"RECEIVERID"` | Ví động — tra theo biến trong TRANSBODY |
 | `wallet` | `"<PocketId cố định>"` | Ví tĩnh — System, Bank (tra bằng ID cứng) |
 
-> **Bỏ step có `amount == 0`** (ví dụ phí = 0 thì bỏ step phí, đừng insert bút toán 0đ).
-
 ---
 
 ## 3. Nhóm Runtime & Sổ sách — Data Dictionary
 
 ### 3.1. `TransactionTrail` — Hồ sơ giao dịch
 
-> Sống xuyên suốt qua cả 3 bước. Là "hồ sơ bệnh án" của một giao dịch.
-
-> ⚠️ **v2 — bổ sung:** `initiatorId` + `initiatorType` để biết ai khởi tạo giao dịch (dùng cho audit và Verify nạp lại đúng hồ sơ).
-
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
 | `_id` | `ObjectId` | PK, auto | Khoá chính. **Đây chính là `transRefId`** — các model khác (`Transaction`, `PocketEntry`) lưu `transRefId = String(trail._id)` để cross-reference |
 | `serviceId` | `String` | FK → `Service._id`, NOT NULL | Nghiệp vụ đang được thực thi |
 | `initiatorId` | `ObjectId` | FK → `Customer._id` hoặc `Officer._id`, NOT NULL | ID người khởi tạo giao dịch |
-| `initiatorType` | `String` | `customer \| officer`, NOT NULL | Phân biệt loại người khởi tạo (P2P/Bill = `customer`; Cash-in = `officer`) |
+| `initiatorType` | `String` | `customer \| officer`, NOT NULL | Phân biệt loại người khởi tạo |
 | `inputMessage` | `Object` | NOT NULL | Snapshot toàn bộ input thô từ Client |
-| `outputMessage` | `Object` | NOT NULL | Dữ liệu đã xử lý bao gồm `TRANSBODY` (danh sách các biến đã dựng) |
+| `outputMessage` | `Object` | NOT NULL | Dữ liệu đã xử lý bao gồm `TRANSBODY` |
 | `status` | `String` | `init \| pending \| done \| failed` | Vòng đời: `init` → `pending` (Request xong) → `done`/`failed` (Verify xong) |
 | `createdAt` | `Date` | auto | Thời điểm tạo |
 | `updatedAt` | `Date` | auto | Thời điểm cập nhật gần nhất |
 
-**Vòng đời `status`:**
-
-```
-init  →  pending  →  done
-                 ↘  failed
-```
-
-| Trạng thái | Khi nào | Tiền có chạy không |
-|-----------|---------|-------------------|
-| `init` | Vừa tạo Trail ở Request (trước validate) | Không |
-| `pending` | Request hoàn tất validate thành công | Không |
-| `done` | Verify hoàn tất, tiền đã ghi sổ | **Có** |
-| `failed` | Bất kỳ lỗi nào trong Verify | Không (rollback) |
-
 ---
 
 ### 3.2. `Transaction` — Biên lai giao dịch
-
-> Chỉ được tạo duy nhất **1 lần**, ở bước Verify thành công, trong `session.withTransaction`.
 
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
 | `_id` | `ObjectId` | PK, auto | Khoá chính |
 | `transRefId` | `String` | FK → `TransactionTrail._id`, NOT NULL | Mã tham chiếu, dùng cho idempotency và join với `PocketEntry` |
 | `serviceId` | `String` | FK → `Service._id`, NOT NULL | Nghiệp vụ |
-| `sender` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví gửi chính (= ví Bank với Cash-in, ví Customer với P2P/Bill) |
-| `receiver` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví nhận chính (= ví Customer với Cash-in, ví Receiver/Biller với P2P/Bill) |
+| `sender` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví gửi chính |
+| `receiver` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví nhận chính |
 | `amount` | `Number` | NOT NULL, ≥ 0 | Số tiền gốc |
 | `fee` | `Number` | NOT NULL, ≥ 0 | Phí giao dịch |
 | `totalAmount` | `Number` | NOT NULL | `amount + fee` |
 | `status` | `String` | `done \| failed` | Kết quả |
 | `createdAt` | `Date` | auto | Thời điểm hoàn tất |
 
-> Lưu ý: `sender` và `receiver` trỏ tới `Pocket._id`, không phải `Customer._id`. Dùng `transRefId` để join sang `PocketEntry` khi cần xem toàn bộ dòng tiền.
-
 ---
 
-### 3.3. `Pocket` — Ví tiền
+### 3.3. `Pocket` — Ví tiền (Read Model / Cache)
 
-> **v2 — quan hệ với Customer:** Scope mini-wallet (1 loại tiền tệ) → mỗi Customer/Biller có đúng **1 Pocket**. Không còn field `pocket` trên `Customer`; tra ví qua `Pocket.user` + `Pocket.client`.
+> Trong kiến trúc Event Sourcing, bảng này đóng vai trò là **Read Model**. Mọi sửa đổi số dư đều được lưu dưới dạng Event vào `PocketEntry`.
 
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
@@ -375,38 +352,44 @@ init  →  pending  →  done
 | `user` | `ObjectId` | FK → `Customer._id \| Officer._id \| Biller._id`, NOT NULL | Chủ ví |
 | `client` | `String` | `customer \| biller \| system \| bank` | Loại chủ thể sở hữu |
 | `currency` | `String` | FK → `Currency.code`, NOT NULL | Đơn vị tiền tệ |
-| `balance` | `Number` | NOT NULL, ≥ 0 | Số dư hiện tại |
+| `balance` | `Number` | NOT NULL, ≥ 0 | Số dư hiện tại (Cache aggregate từ PocketEntry) |
 | `checksum` | `String` | NOT NULL | MD5 hash `(balance + user + ...)` để chống sửa tay trực tiếp trong DB |
-| `state` | `String` | `idle \| inProgress` | Trạng thái khoá: `inProgress` = đang có giao dịch, chống race condition |
-| `status` | `String` | `active \| frozen \| closed` | Trạng thái hoạt động của ví |
+| `status` | `String` | `active \| frozen \| closed` | Trạng thái hoạt động của ví (`frozen` khi Checksum Auditor phát hiện lỗi) |
 
-**Cơ chế `checksum`:**
-- Sau mỗi thao tác `debit`/`credit`, hệ thống tính lại `checksum = md5(balance + userId + ...)`.
-- Bước Verify sẽ kiểm tra checksum trước khi ghi sổ. Checksum không khớp → từ chối giao dịch.
-
-**Cơ chế `state` (Anti Race-Condition):**
-```
-Bước 7.1 (Verify): SET state = 'inProgress'   ← Khoá
-   ... thực hiện giao dịch ...
-Bước 7.7 (Verify): SET state = 'idle'          ← Mở khoá (MỌI LỐI RA đều phải mở khoá)
-```
+**Cơ chế Redis Mutex Lock (Anti Double-Spending):**
+Thay vì dùng biến trạng thái trong DB để khóa ví, hệ thống hiện đại sử dụng `SETNX` trên **Redis** để khóa ví khi bắt đầu bước Verify. Tốc độ khóa qua RAM cực nhanh và an toàn. Nếu 1 giao dịch đang giữ khóa, giao dịch đến sau sẽ bị từ chối ngay lập tức.
 
 ---
 
-### 3.4. `PocketEntry` — Bút toán sổ cái
+### 3.4. `PocketEntry` — Bút toán sổ cái (Immutable Event Log)
 
-> Ghi lại **từng dòng tiền** của mỗi `glStep`. Dùng để audit, reconcile.  
-> Join với `Transaction` qua `transRefId` (không có FK trực tiếp).
+> Cơ chế **Append-Only Ledger**: Không bao giờ UPDATE số dư ví bằng DB query `$inc` trực tiếp (Sails Waterline không hỗ trợ native atomic updates tốt). Mọi biến động đều được `INSERT` vào bảng này.
 
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
 | `_id` | `ObjectId` | PK, auto | Khoá chính |
-| `transRefId` | `String` | FK → `TransactionTrail._id`, NOT NULL | Mã tham chiếu giao dịch; dùng để join với `Transaction` |
+| `transRefId` | `String` | FK → `TransactionTrail._id`, NOT NULL | Mã tham chiếu giao dịch |
 | `stepOrder` | `Number` | NOT NULL | Thứ tự glStep tương ứng (0, 1, ...) |
 | `debit` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví bị trừ tiền |
 | `credit` | `ObjectId` | FK → `Pocket._id`, NOT NULL | Ví được cộng tiền |
 | `amount` | `Number` | NOT NULL, > 0 | Số tiền bút toán |
-| `status` | `String` | `settled` | Luôn là `settled` (đã cam kết trong transaction ACID) |
+| `status` | `String` | `settled` | Luôn là `settled` |
+| `createdAt` | `Date` | auto | Thời điểm tạo |
+
+---
+
+### 3.5. `SystemAuditLog` — Nhật ký Kiểm toán Hệ thống (Background Job)
+
+> Lưu lại lịch sử các đợt rà quét tự động (Cron Job) chạy ngầm để phát hiện các ví bị mất đồng bộ hoặc bị sửa lén dữ liệu (Mismatch Checksum).
+
+| Trường | Kiểu | Ràng buộc | Mô tả |
+|--------|------|-----------|-------|
+| `_id` | `ObjectId` | PK, auto | Khoá chính |
+| `auditType` | `String` | NOT NULL | Loại kiểm toán. VD: `"CHECKSUM_SCAN"` |
+| `targetType` | `String` | NOT NULL | Bảng mục tiêu. VD: `"Pocket"` |
+| `targetId` | `ObjectId` | NOT NULL | ID mục tiêu bị lỗi |
+| `status` | `String` | `passed \| failed` | Kết quả rà soát |
+| `details` | `String` | optional | Chi tiết lỗi nếu có |
 | `createdAt` | `Date` | auto | Thời điểm tạo |
 
 ---
@@ -415,14 +398,12 @@ Bước 7.7 (Verify): SET state = 'idle'          ← Mở khoá (MỌI LỐI RA
 
 ### 4.1. `Customer` — Khách hàng cá nhân
 
-> ⚠️ **v2:** Bỏ field `pocket` trực tiếp trên Customer. Tra ví qua `Pocket.findOne({ user: customer._id, client: 'customer' })`.
-
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
 | `_id` | `ObjectId` | PK, auto | Khoá chính |
-| `phone` | `String` | UNIQUE, NOT NULL | Số điện thoại — dùng làm username đăng nhập và định danh |
+| `phone` | `String` | UNIQUE, NOT NULL | Số điện thoại |
 | `name` | `String` | NOT NULL | Họ tên đầy đủ |
-| `hashedPin` | `String` | NOT NULL | PIN đã băm (bcrypt), dùng để xác thực ở Bước 3 |
+| `hashedPin` | `String` | NOT NULL | PIN đã băm (bcrypt) |
 | `status` | `String` | `active \| locked \| closed` | Trạng thái tài khoản |
 
 ---
@@ -434,7 +415,7 @@ Bước 7.7 (Verify): SET state = 'idle'          ← Mở khoá (MỌI LỐI RA
 | `_id` | `ObjectId` | PK, auto | Khoá chính |
 | `username` | `String` | UNIQUE, NOT NULL | Tên đăng nhập |
 | `hashedPassword` | `String` | NOT NULL | Mật khẩu đã băm (bcrypt) |
-| `role` | `String` | `admin \| cashier` | Phân quyền: `admin` quản lý config, `cashier` thực hiện Cash-in. *Ghi chú: Tuần 3 chưa enforce RBAC — field tồn tại để chuẩn bị mở rộng.* |
+| `role` | `String` | `admin \| cashier` | Phân quyền |
 | `status` | `String` | `active \| locked` | Trạng thái tài khoản |
 
 ---
@@ -443,14 +424,12 @@ Bước 7.7 (Verify): SET state = 'idle'          ← Mở khoá (MỌI LỐI RA
 
 | Trường | Kiểu | Ràng buộc | Mô tả |
 |--------|------|-----------|-------|
-| `_id` | `ObjectId` | PK, auto | Khoá chính, dùng trong `Service.actionParams.billerId` |
+| `_id` | `ObjectId` | PK, auto | Khoá chính |
 | `code` | `String` | UNIQUE, NOT NULL | Mã định danh. VD: `"EVN_HCM"` |
-| `name` | `String` | NOT NULL | Tên hiển thị. VD: `"Điện lực TP.HCM"` |
-| `inquiryUrl` | `String` | NOT NULL | URL API để tra cứu hoá đơn (gọi ở Request Bước 3.1) |
-| `paymentUrl` | `String` | NOT NULL | URL API để xác nhận thanh toán (gọi ở Verify Bước 5.1) |
+| `name` | `String` | NOT NULL | Tên hiển thị |
+| `inquiryUrl` | `String` | NOT NULL | URL API để tra cứu hoá đơn (gọi ở Request) |
+| `paymentUrl` | `String` | NOT NULL | URL API để xác nhận thanh toán (gọi ở Verify) |
 | `status` | `String` | `active \| inactive` | Trạng thái hoạt động |
-
-> ⚠️ **v3:** Bỏ field `pocket` trực tiếp trên Biller. Tra ví qua `Pocket.findOne({ user: biller._id, client: 'biller' })` — nhất quán với cách tra ví Customer.
 
 ---
 
@@ -463,32 +442,3 @@ Bước 7.7 (Verify): SET state = 'idle'          ← Mở khoá (MỌI LỐI RA
 | `name` | `String` | NOT NULL | Tên đầy đủ. VD: `"Việt Nam Đồng"` |
 | `symbol` | `String` | NOT NULL | Ký hiệu. VD: `"₫"` |
 | `status` | `String` | `active \| inactive` | Trạng thái |
-
----
-
-## 5. Tổng hợp quan hệ giữa các nhóm
-
-```
-[IDENTITY]                     [CONFIG]                        [RUNTIME]
-─────────────────────          ────────────────────────        ──────────────────────────────
-Customer ──owns──► Pocket      Service ──has──► TransField     TransactionTrail
-Biller   ──owns──► Pocket              ──has──► TransValidation  ├─ initiatorId ──► Customer | Officer
-Officer                                ──has──► TransDefinition  ├─ serviceId   ──► Service
-                                                └─ glSteps[]     ├─ generates   ──► PocketEntry
-                                                                  │                  ├─debit──► Pocket
-                                                                  │                  └─credit──► Pocket
-                                                                  └─ finalizes   ──► Transaction
-                                                                                     ├─sender──► Pocket
-                                                                                     └─receiver─► Pocket
-```
-
-**Luồng hoạt động cốt lõi:**
-1. **Admin/Officer** tạo bộ Config (`Service` + `TransField` + `TransValidation` + `TransDefinition`).
-2. **Customer/Officer** gọi API → `Transaction.js` đóng dấu TRANSTEP → `NeonMessage.js` xử lý.
-3. **Request:** Đọc Config → dựng `transInput` → validate → tạo `TransactionTrail(status=pending)`.
-4. **Confirm:** Đọc Trail → trả `authMethod`.
-5. **Verify:** Đọc Trail → khoá Pocket → xác thực → đọc `glSteps` → chạy ACID transaction → ghi `PocketEntry` + `Transaction` + lật Trail `done` → mở khoá Pocket.
-
----
-
-*Tài liệu bám sát `WEEK2-DESIGN-BRIEF.md` mục 5 (Năm khối config) và mục 6 (Sổ sách + ExecuteTransaction). Khoá ngoại Config = `String(service._id)` theo cạm bẫy #2 (mục 9 Brief).*
